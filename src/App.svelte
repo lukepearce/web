@@ -3,6 +3,7 @@
   import { links } from "./links";
   import NavLink from "./lib/NavLink.svelte";
   import { hoverGlitch } from "./lib/actions";
+  import { initCursor } from "./lib/cursor";
 
   let animating = $state(false);
 
@@ -13,6 +14,11 @@
     { x: 52, y: 48 },
     { x: 38, y: 74 },
   ];
+
+  $effect(() => {
+    const cleanup = initCursor();
+    return cleanup;
+  });
 </script>
 
 <div class="relative min-h-dvh">

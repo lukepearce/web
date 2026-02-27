@@ -17,7 +17,3 @@
 nav.is-animating a {
   pointer-events: none;
 }
-
-nav.is-animating a:hover {
-  border-bottom-color: transparent;
-}

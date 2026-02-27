@@ -1,4 +1,4 @@
-import { gsap } from "gsap";
+const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+=?/";
 
 // Shared mouse position — single listener, all elements read from it
 const mouse = { x: -9999, y: -9999 };
@@ -26,12 +26,78 @@ function randSign(): number {
   return Math.random() < 0.5 ? -1 : 1;
 }
 
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+function randomGlyph(): string {
+  return GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
 }
 
-const INNER_RADIUS = 40;
-const OUTER_RADIUS = 200;
+const INNER_RADIUS = 25;
+const OUTER_RADIUS = 100;
+
+// --- Shared link registry for repulsion ---
+
+interface WanderEntry {
+  node: HTMLElement;
+  x: number;
+  y: number;
+  targetX: number;
+  targetY: number;
+}
+
+const wanderEntries: WanderEntry[] = [];
+const MIN_LINK_DIST = 18; // minimum % distance between link centers
+const WANDER_LERP = 0.00003; // very slow approach per ms
+
+// --- Sine channel system for layered, non-repeating motion ---
+
+interface Channel {
+  freq: number;
+  phase: number;
+  amp: number;
+}
+
+function makeChannels(
+  count: number,
+  freqMin: number,
+  freqMax: number,
+  ampMin: number,
+  ampMax: number,
+): Channel[] {
+  return Array.from({ length: count }, () => ({
+    freq: rand(freqMin, freqMax),
+    phase: rand(0, Math.PI * 2),
+    amp: rand(ampMin, ampMax) * randSign(),
+  }));
+}
+
+function evalChannels(channels: Channel[], time: number): number {
+  return channels.reduce(
+    (sum, ch) => sum + Math.sin(time * ch.freq + ch.phase) * ch.amp,
+    0,
+  );
+}
+
+// --- Per-character state ---
+
+interface CharState {
+  span: HTMLSpanElement;
+  originalChar: string;
+  xChannels: Channel[];
+  yChannels: Channel[];
+  zChannels: Channel[];
+  rotXChannels: Channel[];
+  rotYChannels: Channel[];
+  rotZChannels: Channel[];
+  scaleChannel: Channel;
+  skewChannel: Channel;
+  calmPhase: number;
+  lastGlitchCheck: number;
+  isGlitched: boolean;
+  glitchChar: string;
+  glitchInterval: number;
+  glitchProb: number;
+}
+
+// --- DOM splitting ---
 
 function splitChars(node: HTMLElement): HTMLSpanElement[] {
   const text = node.textContent || "";
@@ -51,78 +117,168 @@ function splitChars(node: HTMLElement): HTMLSpanElement[] {
   });
 }
 
+// --- Action ---
+
 export function floatingLink(node: HTMLElement) {
   ensureMouseListener();
 
   const originalText = node.textContent || "";
   const chars = splitChars(node);
-  const animatable = chars.filter((c) => c.textContent !== "\u00A0");
 
-  const allTweens: gsap.core.Tween[] = [];
+  // Build per-character animation state
+  const states: CharState[] = [];
+  chars.forEach((span) => {
+    const orig =
+      span.textContent === "\u00A0" ? " " : span.textContent || "";
+    if (orig === " ") return;
 
-  animatable.forEach((char) => {
-    // Layer 1: translation drift — slow, wide orbits
-    allTweens.push(
-      gsap.to(char, {
-        x: rand(12, 45) * randSign(),
-        y: rand(12, 45) * randSign(),
-        z: rand(25, 80) * randSign(),
-        duration: rand(3, 10),
-        ease: pick(["sine.inOut", "power1.inOut", "power2.inOut"]),
-        repeat: -1,
-        yoyo: true,
-        delay: rand(0, 5),
-      }),
-    );
-
-    // Layer 2: rotation + skew — medium speed, different axes emphasized
-    allTweens.push(
-      gsap.to(char, {
-        rotateX: rand(10, 40) * randSign(),
-        rotateY: rand(10, 40) * randSign(),
-        rotateZ: rand(5, 30) * randSign(),
-        skewX: rand(2, 12) * randSign(),
-        duration: rand(2, 7),
-        ease: pick([
-          "sine.inOut",
-          "elastic.inOut(1, 0.3)",
-          "back.inOut(1.7)",
-        ]),
-        repeat: -1,
-        yoyo: true,
-        delay: rand(0, 4),
-      }),
-    );
-
-    // Layer 3: scale + opacity
-    allTweens.push(
-      gsap.to(char, {
-        scale: rand(0.8, 1.25),
-        opacity: rand(0.6, 1),
-        duration: rand(1.5, 5),
-        ease: "sine.inOut",
-        repeat: -1,
-        yoyo: true,
-        delay: rand(0, 3),
-      }),
-    );
+    states.push({
+      span,
+      originalChar: orig,
+      xChannels: makeChannels((rand(2, 4) | 0), 0.0002, 0.0011, 6, 32),
+      yChannels: makeChannels((rand(2, 4) | 0), 0.0002, 0.0011, 6, 32),
+      zChannels: makeChannels((rand(1, 3) | 0), 0.00012, 0.0007, 12, 55),
+      rotXChannels: makeChannels((rand(1, 3) | 0), 0.00012, 0.0007, 4, 28),
+      rotYChannels: makeChannels((rand(1, 3) | 0), 0.00012, 0.0007, 4, 28),
+      rotZChannels: makeChannels((rand(1, 3) | 0), 0.0002, 0.0009, 2, 20),
+      scaleChannel: {
+        freq: rand(0.0002, 0.0006),
+        phase: rand(0, Math.PI * 2),
+        amp: rand(0.04, 0.18),
+      },
+      skewChannel: {
+        freq: rand(0.0002, 0.0006),
+        phase: rand(0, Math.PI * 2),
+        amp: rand(2, 8),
+      },
+      calmPhase: rand(0, Math.PI * 2),
+      lastGlitchCheck: 0,
+      isGlitched: false,
+      glitchChar: randomGlyph(),
+      glitchInterval: rand(250, 800),
+      glitchProb: rand(0.12, 0.4),
+    });
   });
 
-  // Cursor proximity damping — modulate timeScale per character
-  let raf: number;
+  // Register for wander + repulsion
+  const initialX = parseFloat(node.style.left) || 50;
+  const initialY = parseFloat(node.style.top) || 50;
+  const entry: WanderEntry = {
+    node,
+    x: initialX,
+    y: initialY,
+    targetX: rand(5, 80),
+    targetY: rand(8, 82),
+  };
+  wanderEntries.push(entry);
 
-  function tick() {
-    animatable.forEach((char) => {
-      const rect = char.getBoundingClientRect();
+  // Main animation loop
+  let raf: number;
+  let prevTime = 0;
+
+  function tick(time: number) {
+    const dt = prevTime ? time - prevTime : 16;
+    prevTime = time;
+
+    // --- Wander with repulsion ---
+    // Steer toward target
+    entry.x += (entry.targetX - entry.x) * WANDER_LERP * dt;
+    entry.y += (entry.targetY - entry.y) * WANDER_LERP * dt;
+
+    // Repel from other links
+    for (const other of wanderEntries) {
+      if (other === entry) continue;
+      const dx = entry.x - other.x;
+      const dy = entry.y - other.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < MIN_LINK_DIST && dist > 0.1) {
+        const force = (MIN_LINK_DIST - dist) * 0.015;
+        entry.x += (dx / dist) * force;
+        entry.y += (dy / dist) * force;
+      }
+    }
+
+    // Clamp to viewport
+    entry.x = Math.max(5, Math.min(85, entry.x));
+    entry.y = Math.max(8, Math.min(85, entry.y));
+
+    // Pick new target when close
+    const distToTarget = Math.sqrt(
+      (entry.x - entry.targetX) ** 2 + (entry.y - entry.targetY) ** 2,
+    );
+    if (distToTarget < 3) {
+      entry.targetX = rand(5, 80);
+      entry.targetY = rand(8, 82);
+    }
+
+    node.style.left = `${entry.x}%`;
+    node.style.top = `${entry.y}%`;
+
+    // --- Per-character animation ---
+    const isScrambling = node.closest(".is-animating") !== null;
+
+    states.forEach((state) => {
+      const rect = state.span.getBoundingClientRect();
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
       const dx = mouse.x - cx;
       const dy = mouse.y - cy;
       const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // 1 = far (wild), 0 = close (calm/reformed)
       const damping = smoothstep(INNER_RADIUS, OUTER_RADIUS, dist);
 
-      gsap.getTweensOf(char).forEach((t) => t.timeScale(damping));
+      // Wild state — layered sines per axis
+      const wildX = evalChannels(state.xChannels, time);
+      const wildY = evalChannels(state.yChannels, time);
+      const wildZ = evalChannels(state.zChannels, time);
+      const wildRotX = evalChannels(state.rotXChannels, time);
+      const wildRotY = evalChannels(state.rotYChannels, time);
+      const wildRotZ = evalChannels(state.rotZChannels, time);
+      const wildScale =
+        1 +
+        Math.sin(time * state.scaleChannel.freq + state.scaleChannel.phase) *
+          state.scaleChannel.amp;
+      const wildSkew =
+        Math.sin(time * state.skewChannel.freq + state.skewChannel.phase) *
+        state.skewChannel.amp;
+
+      // Calm state — very gentle residual drift
+      const p = state.calmPhase;
+      const calmX = Math.sin(time * 0.0004 + p) * 1.5;
+      const calmY = Math.sin(time * 0.00035 + p + 1) * 1.5;
+      const calmRotZ = Math.sin(time * 0.0003 + p + 2) * 0.8;
+      const calmScale = 1 + Math.sin(time * 0.00025 + p + 3) * 0.015;
+
+      // Blend wild → calm based on cursor proximity
+      const x = calmX + (wildX - calmX) * damping;
+      const y = calmY + (wildY - calmY) * damping;
+      const z = wildZ * damping;
+      const rotX = wildRotX * damping;
+      const rotY = wildRotY * damping;
+      const rotZ = calmRotZ + (wildRotZ - calmRotZ) * damping;
+      const scale = calmScale + (wildScale - calmScale) * damping;
+      const skew = wildSkew * damping;
+
+      state.span.style.transform =
+        `translate3d(${x}px, ${y}px, ${z}px) rotateX(${rotX}deg) rotateY(${rotY}deg) rotateZ(${rotZ}deg) scale(${scale}) skewX(${skew}deg)`;
+
+      // Ambient glitch — per-character timing, skip during click scramble
+      if (!isScrambling) {
+        if (time - state.lastGlitchCheck > state.glitchInterval) {
+          state.lastGlitchCheck = time;
+          const shouldGlitch = Math.random() < damping * state.glitchProb;
+          if (shouldGlitch && !state.isGlitched) {
+            state.glitchChar = randomGlyph();
+          }
+          state.isGlitched = shouldGlitch;
+        }
+        state.span.textContent = state.isGlitched
+          ? state.glitchChar
+          : state.originalChar;
+      }
     });
+
     raf = requestAnimationFrame(tick);
   }
 
@@ -131,7 +287,8 @@ export function floatingLink(node: HTMLElement) {
   return {
     destroy() {
       cancelAnimationFrame(raf);
-      allTweens.forEach((t) => t.kill());
+      const idx = wanderEntries.indexOf(entry);
+      if (idx !== -1) wanderEntries.splice(idx, 1);
       node.textContent = originalText;
     },
   };
