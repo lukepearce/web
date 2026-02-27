@@ -7,11 +7,26 @@ function randomGlyph(): string {
   return GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
 }
 
+// Set text on an element, working with float-char spans if present
+function setText(el: HTMLElement, text: string): void {
+  const spans = el.querySelectorAll<HTMLElement>(".float-char");
+  if (spans.length > 0) {
+    const characters = [...text];
+    spans.forEach((span, i) => {
+      if (i < characters.length) {
+        span.textContent = characters[i] === " " ? "\u00A0" : characters[i];
+      }
+    });
+  } else {
+    el.textContent = text;
+  }
+}
+
 export function scramble(
   el: HTMLElement,
   finalText: string,
   onComplete: () => void,
-  duration?: number
+  duration?: number,
 ): void {
   const chars = finalText.split("");
   const total = Math.max(duration ?? chars.length * 140, MIN_DURATION);
@@ -46,10 +61,10 @@ export function scramble(
       return randomGlyph();
     });
 
-    el.textContent = display.join("");
+    setText(el, display.join(""));
 
     if (allResolved || elapsed >= total) {
-      el.textContent = finalText;
+      setText(el, finalText);
       setTimeout(onComplete, POST_RESOLVE_PAUSE);
     } else {
       requestAnimationFrame(tick);
@@ -57,7 +72,10 @@ export function scramble(
   }
 
   // Kick off with a scrambled state immediately
-  el.textContent = chars.map((c) => (c === " " ? " " : randomGlyph())).join("");
+  setText(
+    el,
+    chars.map((c) => (c === " " ? " " : randomGlyph())).join(""),
+  );
   requestAnimationFrame(tick);
 }
 
@@ -81,9 +99,9 @@ export function startHoverGlitch(el: HTMLElement, text: string): () => void {
           .filter((i) => i !== -1);
         const idx = candidates[Math.floor(Math.random() * candidates.length)];
         chars[idx] = randomGlyph();
-        el.textContent = chars.join("");
+        setText(el, chars.join(""));
       } else {
-        el.textContent = text;
+        setText(el, text);
       }
     }
 
@@ -95,6 +113,6 @@ export function startHoverGlitch(el: HTMLElement, text: string): () => void {
   // Return cleanup function
   return () => {
     if (frame !== null) cancelAnimationFrame(frame);
-    el.textContent = text;
+    setText(el, text);
   };
 }
