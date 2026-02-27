@@ -1,0 +1,61 @@
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #0a0a0a;
+  color: #c8c8c8;
+  font-family: "Space Mono", monospace;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  gap: 2.4rem;
+}
+
+h1 {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3em;
+  color: #e0e0e0;
+}
+
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+nav a {
+  color: #c8c8c8;
+  text-decoration: none;
+  font-size: 0.95rem;
+  font-weight: 400;
+  padding: 0.15rem 0;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s;
+  width: fit-content;
+}
+
+nav a:hover {
+  border-bottom-color: #555;
+}
+
+nav.is-animating a {
+  pointer-events: none;
+}
+
+nav.is-animating a:hover {
+  border-bottom-color: transparent;
+}
