@@ -23,7 +23,7 @@
 
 <div class="relative min-h-dvh">
   <h1
-    class="absolute top-8 left-8 text-sm font-bold uppercase tracking-[0.3em] text-[#e0e0e0]"
+    class="absolute top-8 left-8 z-10 text-sm font-bold uppercase tracking-[0.3em] text-[#e0e0e0]"
     use:hoverGlitch={"Luke Pearce"}
   >
     Luke Pearce

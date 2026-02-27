@@ -7,15 +7,23 @@ export function hoverGlitch(node: HTMLElement, param: HoverGlitchParam) {
   let enabled = typeof param === "string" ? true : param.enabled;
   let stop: (() => void) | null = null;
 
-  function onEnter() {
-    if (!enabled) return;
+  // Start glitching immediately
+  if (enabled) {
     stop = startHoverGlitch(node, text);
   }
 
-  function onLeave() {
+  function onEnter() {
+    // Hover = calm, stop glitching
     if (stop) {
       stop();
       stop = null;
+    }
+  }
+
+  function onLeave() {
+    // Leave = resume glitching
+    if (enabled) {
+      stop = startHoverGlitch(node, text);
     }
   }
 
@@ -30,6 +38,9 @@ export function hoverGlitch(node: HTMLElement, param: HoverGlitchParam) {
       if (enabled && !nowEnabled && stop) {
         stop();
         stop = null;
+      }
+      if (!enabled && nowEnabled && !stop) {
+        stop = startHoverGlitch(node, text);
       }
 
       enabled = nowEnabled;
