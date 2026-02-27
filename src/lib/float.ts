@@ -106,6 +106,7 @@ function splitChars(node: HTMLElement): HTMLSpanElement[] {
     const span = document.createElement("span");
     span.className = "float-char";
     span.style.display = "inline-block";
+    span.style.marginRight = "0.35em";
     if (char === " ") {
       span.textContent = "\u00A0";
     } else {
