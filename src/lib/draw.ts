@@ -36,6 +36,7 @@ let mouseDownPos: Point | null = null;
 let canvas: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
 let raf = 0;
+let touchPos: { x: number; y: number } | null = null;
 
 // --- Geometry helpers ---
 
@@ -172,6 +173,68 @@ function onMouseUp() {
   drawing = false;
   currentPoints = null;
   mouseDownPos = null;
+}
+
+// --- Touch handlers ---
+
+function onTouchStart(e: TouchEvent) {
+  if ((e.target as HTMLElement).closest("a")) return;
+  const t = e.touches[0];
+  mouseDownPos = { x: t.clientX, y: t.clientY };
+  touchPos = { x: t.clientX, y: t.clientY };
+}
+
+function onTouchMove(e: TouchEvent) {
+  const t = e.touches[0];
+  touchPos = { x: t.clientX, y: t.clientY };
+
+  if (!mouseDownPos) return;
+
+  const dx = t.clientX - mouseDownPos.x;
+  const dy = t.clientY - mouseDownPos.y;
+
+  if (!drawing && Math.sqrt(dx * dx + dy * dy) >= DRAG_THRESHOLD) {
+    drawing = true;
+    currentPoints = [{ x: mouseDownPos.x, y: mouseDownPos.y }];
+  }
+
+  if (drawing && currentPoints) {
+    e.preventDefault(); // suppress scrolling while drawing
+    const last = currentPoints[currentPoints.length - 1];
+    const pdx = t.clientX - last.x;
+    const pdy = t.clientY - last.y;
+    if (pdx * pdx + pdy * pdy >= MIN_POINT_DIST * MIN_POINT_DIST) {
+      currentPoints.push({ x: t.clientX, y: t.clientY });
+    }
+  }
+}
+
+function onTouchEnd() {
+  if (drawing && currentPoints && currentPoints.length > 2) {
+    const first = currentPoints[0];
+    const last = currentPoints[currentPoints.length - 1];
+    const closeDist = Math.sqrt(
+      (first.x - last.x) ** 2 + (first.y - last.y) ** 2,
+    );
+    const isClosed =
+      closeDist <= CLOSE_DIST && polygonArea(currentPoints) >= MIN_LOOP_AREA;
+
+    const now = performance.now();
+    const lifetime = isClosed ? CLOSED_LIFETIME : OPEN_LIFETIME;
+
+    strokes.push({
+      points: currentPoints,
+      closed: isClosed,
+      bbox: computeBBox(currentPoints, REPEL_RADIUS),
+      createdAt: now,
+      fadeStart: lifetime - FADE_DURATION,
+    });
+  }
+
+  drawing = false;
+  currentPoints = null;
+  mouseDownPos = null;
+  touchPos = null;
 }
 
 // --- Render ---
@@ -337,6 +400,10 @@ export function isCurrentlyDrawing(): boolean {
   return drawing;
 }
 
+export function getTouchPos(): { x: number; y: number } | null {
+  return touchPos;
+}
+
 // --- Init / cleanup ---
 
 export function initDraw(): () => void {
@@ -351,6 +418,9 @@ export function initDraw(): () => void {
   window.addEventListener("mousedown", onMouseDown);
   window.addEventListener("mousemove", onMouseMove);
   window.addEventListener("mouseup", onMouseUp);
+  window.addEventListener("touchstart", onTouchStart, { passive: true });
+  window.addEventListener("touchmove", onTouchMove, { passive: false });
+  window.addEventListener("touchend", onTouchEnd);
 
   raf = requestAnimationFrame(render);
 
@@ -360,6 +430,9 @@ export function initDraw(): () => void {
     window.removeEventListener("mousedown", onMouseDown);
     window.removeEventListener("mousemove", onMouseMove);
     window.removeEventListener("mouseup", onMouseUp);
+    window.removeEventListener("touchstart", onTouchStart);
+    window.removeEventListener("touchmove", onTouchMove);
+    window.removeEventListener("touchend", onTouchEnd);
     canvas?.remove();
     canvas = null;
     ctx = null;

@@ -13,6 +13,15 @@ function ensureMouseListener() {
     mouse.x = e.clientX;
     mouse.y = e.clientY;
   });
+  window.addEventListener("touchmove", (e) => {
+    const t = e.touches[0];
+    mouse.x = t.clientX;
+    mouse.y = t.clientY;
+  });
+  window.addEventListener("touchend", () => {
+    mouse.x = -9999;
+    mouse.y = -9999;
+  });
 }
 
 function smoothstep(edge0: number, edge1: number, x: number): number {

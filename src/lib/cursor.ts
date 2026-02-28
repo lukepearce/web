@@ -1,4 +1,4 @@
-import { isCurrentlyDrawing } from "./draw";
+import { isCurrentlyDrawing, getTouchPos } from "./draw";
 
 const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+=?/";
 const GLYPH_COUNT = 12;
@@ -17,19 +17,17 @@ export function initCursor(): () => void {
   // Hide default cursor globally
   const cursorStyle = document.createElement("style");
   cursorStyle.textContent =
-    "*, *::before, *::after { cursor: none !important; }";
+    "@media (pointer: fine) { *, *::before, *::after { cursor: none !important; } }";
   document.head.appendChild(cursorStyle);
 
   const mousePos = { x: -9999, y: -9999 };
   let hasMoved = false;
+  let hasTouch = false;
 
   function onMouseMove(e: MouseEvent) {
     mousePos.x = e.clientX;
     mousePos.y = e.clientY;
-    if (!hasMoved) {
-      hasMoved = true;
-      container.style.opacity = "1";
-    }
+    if (!hasMoved) hasMoved = true;
   }
   window.addEventListener("mousemove", onMouseMove);
 
@@ -64,10 +62,26 @@ export function initCursor(): () => void {
   let prevGlyphColor = "";
   let currentRadius = BASE_RADIUS;
   let currentDrawBoost = 0;
+  let currentOpacity = 0;
 
   function tick(time: number) {
     const dt = prevTime ? time - prevTime : 16;
     prevTime = time;
+
+    // Touch position override
+    const tp = getTouchPos();
+    if (tp) {
+      mousePos.x = tp.x;
+      mousePos.y = tp.y;
+      hasTouch = true;
+      if (!hasMoved) hasMoved = true;
+    }
+
+    // Opacity: on touch devices, show while touching and fade on release
+    // On mouse devices, show once mouse has moved
+    const targetOpacity = hasTouch ? (tp ? 1 : 0) : (hasMoved ? 1 : 0);
+    currentOpacity += (targetOpacity - currentOpacity) * 0.12;
+    container.style.opacity = `${currentOpacity}`;
 
     // Smooth follow
     cx += (mousePos.x - cx) * 0.15;
