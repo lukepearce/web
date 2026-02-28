@@ -6,8 +6,8 @@ export interface LinkEntry {
 
 export const links: LinkEntry[] = [
   { label: "GitHub", url: "https://github.com/lukepearce" },
-  { label: "Claude Code", url: "https://claude.ai" },
-  { label: "Are.na", url: "https://www.are.na/luke-pearce" },
-  { label: "Letterboxd", url: "https://letterboxd.com" },
+  { label: "Instagram", url: "https://www.instagram.com/_luke_pearce" },
+  { label: "Letterboxd", url: "https://letterboxd.com/lukepearce" },
   { label: "Email", url: "mailto:hello@lukepearce.co.uk" },
+  { label: "Strava", url: "https://www.strava.com/athletes/983545"}
 ];
