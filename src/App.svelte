@@ -4,6 +4,7 @@
   import NavLink from "./lib/NavLink.svelte";
   import { hoverGlitch } from "./lib/actions";
   import { initCursor } from "./lib/cursor";
+  import { initDraw } from "./lib/draw";
 
   let animating = $state(false);
 
@@ -16,8 +17,12 @@
   ];
 
   $effect(() => {
-    const cleanup = initCursor();
-    return cleanup;
+    const cleanupCursor = initCursor();
+    const cleanupDraw = initDraw();
+    return () => {
+      cleanupCursor();
+      cleanupDraw();
+    };
   });
 </script>
 

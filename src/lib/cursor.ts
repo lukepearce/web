@@ -1,3 +1,5 @@
+import { isCurrentlyDrawing } from "./draw";
+
 const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+=?/";
 const GLYPH_COUNT = 12;
 const BASE_RADIUS = 32;
@@ -60,6 +62,8 @@ export function initCursor(): () => void {
   let lastGlitch = 0;
   let prevTime = 0;
   let prevGlyphColor = "";
+  let currentRadius = BASE_RADIUS;
+  let currentDrawBoost = 0;
 
   function tick(time: number) {
     const dt = prevTime ? time - prevTime : 16;
@@ -89,12 +93,18 @@ export function initCursor(): () => void {
     // Rotation — slower near links
     rotation += (0.0003 + proximity * 0.0008) * dt;
 
+    // Expand ring while drawing — lerp for smooth transition
+    const isDrawing = isCurrentlyDrawing();
+    const targetRadius = isDrawing ? BASE_RADIUS * 1.4 : BASE_RADIUS;
+    currentRadius += (targetRadius - currentRadius) * 0.08;
+    const radius = currentRadius;
+
     // Position glyphs on ring, fade out near links
     const glyphOpacity = proximity;
     glyphEls.forEach((el, i) => {
       const angle = (i / GLYPH_COUNT) * Math.PI * 2 + rotation;
-      const gx = Math.cos(angle) * BASE_RADIUS - 3;
-      const gy = Math.sin(angle) * BASE_RADIUS - 5;
+      const gx = Math.cos(angle) * radius - 3;
+      const gy = Math.sin(angle) * radius - 5;
       el.style.transform = `translate(${gx}px, ${gy}px)`;
       el.style.opacity = `${glyphOpacity}`;
     });
@@ -119,10 +129,12 @@ export function initCursor(): () => void {
       glyphEls.forEach((el) => (el.style.color = glyphColor));
     }
 
-    // Center dot — pulse when near links
+    // Center dot — pulse when near links, brighten when drawing
     const pulse = Math.sin(time * 0.006) * 0.5 + 0.5; // 0–1 oscillation
     const dotScale = 1 + (1 - proximity) * pulse * 1.5; // up to 2.5x when near
-    const dotBright = Math.round(0x55 + (1 - proximity) * pulse * 0xaa);
+    const targetDrawBoost = isDrawing ? 0x44 : 0;
+    currentDrawBoost += (targetDrawBoost - currentDrawBoost) * 0.08;
+    const dotBright = Math.round(0x55 + (1 - proximity) * pulse * 0xaa + currentDrawBoost);
     const dotHex = Math.min(0xff, dotBright).toString(16).padStart(2, "0");
     dot.style.transform = `translate(-1.5px,-1.5px) scale(${dotScale})`;
     dot.style.background = `#${dotHex}${dotHex}${dotHex}`;

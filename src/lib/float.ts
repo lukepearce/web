@@ -1,3 +1,5 @@
+import { getLineRepulsion, getContainingLoop, getRandomPointInLoop } from "./draw";
+
 const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+=?/";
 
 // Shared mouse position — single listener, all elements read from it
@@ -199,6 +201,24 @@ export function floatingLink(node: HTMLElement) {
       }
     }
 
+    // Line repulsion — push link away from drawn strokes
+    const linkRect = node.getBoundingClientRect();
+    const linkCx = linkRect.left + linkRect.width / 2;
+    const linkCy = linkRect.top + linkRect.height / 2;
+    const lineForce = getLineRepulsion(linkCx, linkCy);
+    // Convert px force to % of viewport
+    entry.x += (lineForce.fx / window.innerWidth) * 100 * 0.5;
+    entry.y += (lineForce.fy / window.innerHeight) * 100 * 0.5;
+
+    // Loop containment — redirect wander target inside enclosing loop
+    const loop = getContainingLoop(linkCx, linkCy);
+    if (loop) {
+      const inside = getRandomPointInLoop(loop);
+      // Convert px target to % of viewport
+      entry.targetX = (inside.x / window.innerWidth) * 100;
+      entry.targetY = (inside.y / window.innerHeight) * 100;
+    }
+
     // Clamp to viewport
     entry.x = Math.max(5, Math.min(85, entry.x));
     entry.y = Math.max(8, Math.min(85, entry.y));
@@ -207,7 +227,7 @@ export function floatingLink(node: HTMLElement) {
     const distToTarget = Math.sqrt(
       (entry.x - entry.targetX) ** 2 + (entry.y - entry.targetY) ** 2,
     );
-    if (distToTarget < 3) {
+    if (distToTarget < 3 && !loop) {
       entry.targetX = rand(5, 80);
       entry.targetY = rand(8, 82);
     }
@@ -226,8 +246,13 @@ export function floatingLink(node: HTMLElement) {
       const dy = mouse.y - cy;
       const dist = Math.sqrt(dx * dx + dy * dy);
 
+      // Line repulsion per character
+      const charLineForce = getLineRepulsion(cx, cy);
+
       // 1 = far (wild), 0 = close (calm/reformed)
-      const damping = smoothstep(INNER_RADIUS, OUTER_RADIUS, dist);
+      // Boost wildness near drawn lines
+      const baseDamping = smoothstep(INNER_RADIUS, OUTER_RADIUS, dist);
+      const damping = Math.min(1, baseDamping + charLineForce.proximity * 0.6);
 
       // Wild state — layered sines per axis
       const wildX = evalChannels(state.xChannels, time);
@@ -261,8 +286,12 @@ export function floatingLink(node: HTMLElement) {
       const scale = calmScale + (wildScale - calmScale) * damping;
       const skew = wildSkew * damping;
 
+      // Add line repulsion offset to character position
+      const finalX = x + charLineForce.fx;
+      const finalY = y + charLineForce.fy;
+
       state.span.style.transform =
-        `translate3d(${x}px, ${y}px, ${z}px) rotateX(${rotX}deg) rotateY(${rotY}deg) rotateZ(${rotZ}deg) scale(${scale}) skewX(${skew}deg)`;
+        `translate3d(${finalX}px, ${finalY}px, ${z}px) rotateX(${rotX}deg) rotateY(${rotY}deg) rotateZ(${rotZ}deg) scale(${scale}) skewX(${skew}deg)`;
 
       // Ambient glitch — per-character timing, skip during click scramble
       if (!isScrambling) {
