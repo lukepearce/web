@@ -5,6 +5,12 @@
 }
 
 @layer base {
+  html, body {
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
   body {
     background: #0a0a0a;
     color: #c8c8c8;
