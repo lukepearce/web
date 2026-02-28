@@ -16,7 +16,7 @@ function ensureMouseListener() {
   window.addEventListener("touchmove", (e) => {
     const t = e.touches[0];
     mouse.x = t.clientX;
-    mouse.y = t.clientY;
+    mouse.y = t.clientY + TOUCH_Y_OFFSET;
   });
   window.addEventListener("touchend", () => {
     mouse.x = -9999;
@@ -43,6 +43,7 @@ function randomGlyph(): string {
 
 const INNER_RADIUS = 25;
 const OUTER_RADIUS = 100;
+const TOUCH_Y_OFFSET = -70; // match cursor offset so calm zone aligns with ring
 
 // --- Shared link registry for repulsion ---
 

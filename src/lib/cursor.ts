@@ -3,6 +3,7 @@ import { isCurrentlyDrawing, getTouchPos } from "./draw";
 const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+=?/";
 const GLYPH_COUNT = 12;
 const BASE_RADIUS = 32;
+const TOUCH_Y_OFFSET = -70; // raise above finger so it's visible
 
 function randomGlyph(): string {
   return GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
@@ -72,7 +73,7 @@ export function initCursor(): () => void {
     const tp = getTouchPos();
     if (tp) {
       mousePos.x = tp.x;
-      mousePos.y = tp.y;
+      mousePos.y = tp.y + TOUCH_Y_OFFSET;
       hasTouch = true;
       if (!hasMoved) hasMoved = true;
     }
