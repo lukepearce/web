@@ -1,71 +1,63 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+use std::time::Instant;
 
-use crate::session::Session;
+use crate::session::{classify, hash_capture, Pane, Status};
 use crate::tmux;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMeta {
-    pub name: String,
-    pub path: String,
-    pub tmux_session: String,
-    #[serde(default)]
-    pub claude_conversation_id: Option<String>,
-    pub last_active: chrono::DateTime<chrono::Utc>,
-}
-
-impl SessionMeta {
-    pub fn new(name: &str, path: &str) -> Self {
-        SessionMeta {
-            name: name.to_string(),
-            path: path.to_string(),
-            tmux_session: tmux::full_name(name),
-            claude_conversation_id: None,
-            last_active: chrono::Utc::now(),
-        }
-    }
-}
-
-pub struct App {
-    pub sessions: Vec<Session>,
-    pub selected: usize,
-
-    /// Modal prompt state — when Some, keystrokes build up the prompt input
-    /// instead of being forwarded to the pty.
-    pub prompt: Option<Prompt>,
-
-    pub should_quit: bool,
-    pub last_error: Option<String>,
-
-    pub sessions_dir: PathBuf,
-
-    /// Last computed pane size — used when spawning a new session so its pty
-    /// is sized right from the start.
-    pub pane_rows: u16,
-    pub pane_cols: u16,
-
-    pub sidebar_width: u16,
-}
 
 pub const SIDEBAR_MIN: u16 = 10;
 pub const SIDEBAR_MAX: u16 = 60;
 const SIDEBAR_STEP: u16 = 2;
 
+pub struct Project {
+    pub name: String,       // "floom"
+    pub tmux_name: String,  // "ccm-floom"
+    pub path: String,
+    pub windows: Vec<WindowRow>,
+}
+
+pub struct WindowRow {
+    pub index: u32,
+    pub name: String,
+    pub status: Status,
+    pub last_hash: u64,
+    pub last_change: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub project: usize,
+    pub window: usize,
+}
+
+pub struct App {
+    pub projects: Vec<Project>,
+    pub selected: Option<Selection>,
+    /// (project tmux name, window index) the pane is currently attached to.
+    pub pane_target: Option<(String, u32)>,
+    pub pane: Option<Pane>,
+
+    pub prompt: Option<Prompt>,
+    pub should_quit: bool,
+    pub last_error: Option<String>,
+
+    pub pane_rows: u16,
+    pub pane_cols: u16,
+    pub sidebar_width: u16,
+}
+
 pub struct Prompt {
     pub kind: PromptKind,
     pub buffer: String,
-    /// For NewSession: first we ask name, then path.
     pub stage: PromptStage,
-    /// Captured first-stage value (session name), used on stage 2.
     pub stash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
-    NewSession,
+    NewProject,
+    NewWindow,
     Rename,
-    ConfirmClose,
+    ConfirmCloseWindow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,144 +69,75 @@ pub enum PromptStage {
 impl Prompt {
     pub fn title(&self) -> &'static str {
         match (self.kind, self.stage) {
-            (PromptKind::NewSession, PromptStage::First) => "New session — name:",
-            (PromptKind::NewSession, PromptStage::Second) => "New session — path:",
-            (PromptKind::Rename, _) => "Rename session to:",
-            (PromptKind::ConfirmClose, _) => "Close session? [y/N]",
+            (PromptKind::NewProject, PromptStage::First) => "New project — name:",
+            (PromptKind::NewProject, PromptStage::Second) => "New project — path:",
+            (PromptKind::NewWindow, _) => "New window name:",
+            (PromptKind::Rename, _) => "Rename window to:",
+            (PromptKind::ConfirmCloseWindow, _) => "Close window? [y/N]",
         }
     }
 }
 
 impl App {
     pub fn new() -> Result<Self> {
-        let sessions_dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("ccm")
-            .join("sessions");
-        std::fs::create_dir_all(&sessions_dir).context("create sessions dir")?;
-
         Ok(App {
-            sessions: Vec::new(),
-            selected: 0,
+            projects: Vec::new(),
+            selected: None,
+            pane_target: None,
+            pane: None,
             prompt: None,
             should_quit: false,
             last_error: None,
-            sessions_dir,
             pane_rows: 24,
             pane_cols: 80,
-            sidebar_width: 22,
+            sidebar_width: 24,
         })
     }
 
-    pub fn active(&self) -> Option<&Session> {
-        self.sessions.get(self.selected)
+    pub fn selected_project(&self) -> Option<&Project> {
+        self.projects.get(self.selected?.project)
+    }
+
+    pub fn selected_window(&self) -> Option<&WindowRow> {
+        let sel = self.selected?;
+        self.projects.get(sel.project)?.windows.get(sel.window)
     }
 
     pub fn next(&mut self) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + 1) % self.sessions.len();
+        let Some(sel) = self.flat_step(1) else { return };
+        self.selected = Some(sel);
     }
 
     pub fn prev(&mut self) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        if self.selected == 0 {
-            self.selected = self.sessions.len() - 1;
-        } else {
-            self.selected -= 1;
-        }
+        let Some(sel) = self.flat_step(-1) else { return };
+        self.selected = Some(sel);
     }
 
-    /// Populate the session list from existing tmux sessions + metadata files.
-    pub fn bootstrap(&mut self) -> Result<()> {
-        let existing = tmux::list_sessions().unwrap_or_default();
-        for full in existing {
-            let short = tmux::short_name(&full).to_string();
-            let meta_path = self.meta_path(&short);
-            let path = if meta_path.exists() {
-                match load_meta(&meta_path) {
-                    Ok(m) => m.path,
-                    Err(_) => tmux::session_path(&full).unwrap_or_else(|| ".".into()),
-                }
-            } else {
-                tmux::session_path(&full).unwrap_or_else(|| ".".into())
-            };
+    fn flat_step(&self, dir: i32) -> Option<Selection> {
+        let flat = self.flatten();
+        if flat.is_empty() {
+            return None;
+        }
+        let cur = self.selected.and_then(|s| {
+            flat.iter().position(|&(p, w)| p == s.project && w == s.window)
+        });
+        let n = flat.len() as i32;
+        let next = match cur {
+            Some(i) => (((i as i32) + dir).rem_euclid(n)) as usize,
+            None => 0,
+        };
+        let (p, w) = flat[next];
+        Some(Selection { project: p, window: w })
+    }
 
-            match Session::spawn(short.clone(), path.clone(), self.pane_rows, self.pane_cols) {
-                Ok(s) => {
-                    self.sessions.push(s);
-                    let _ = self.write_meta(&SessionMeta::new(&short, &path));
-                }
-                Err(e) => {
-                    self.last_error = Some(format!("failed to attach {short}: {e}"));
-                }
+    fn flatten(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (p, proj) in self.projects.iter().enumerate() {
+            for w in 0..proj.windows.len() {
+                out.push((p, w));
             }
         }
-        Ok(())
-    }
-
-    pub fn create_session(&mut self, name: String, path: String) -> Result<()> {
-        if name.trim().is_empty() {
-            anyhow::bail!("session name cannot be empty");
-        }
-        let path = if path.trim().is_empty() {
-            std::env::current_dir()
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| ".".into())
-        } else {
-            shellexpand(&path)
-        };
-
-        if self.sessions.iter().any(|s| s.name == name) {
-            anyhow::bail!("session name '{name}' already exists");
-        }
-
-        let session = Session::spawn(name.clone(), path.clone(), self.pane_rows, self.pane_cols)?;
-        self.sessions.push(session);
-        self.selected = self.sessions.len() - 1;
-        let _ = self.write_meta(&SessionMeta::new(&name, &path));
-        Ok(())
-    }
-
-    pub fn close_active(&mut self) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        let s = self.sessions.remove(self.selected);
-        let _ = tmux::kill_session(&s.tmux_name);
-        let meta_path = self.meta_path(&s.name);
-        let _ = std::fs::remove_file(meta_path);
-        if self.selected >= self.sessions.len() && self.selected > 0 {
-            self.selected -= 1;
-        }
-    }
-
-    pub fn rename_active(&mut self, new_name: String) -> Result<()> {
-        if new_name.trim().is_empty() {
-            anyhow::bail!("new name cannot be empty");
-        }
-        if self.sessions.iter().any(|s| s.name == new_name) {
-            anyhow::bail!("session name '{new_name}' already exists");
-        }
-        let (old_short, old_tmux, path) = {
-            let Some(active) = self.sessions.get(self.selected) else {
-                return Ok(());
-            };
-            (active.name.clone(), active.tmux_name.clone(), active.path.clone())
-        };
-        let new_tmux = tmux::full_name(&new_name);
-        tmux::rename_session(&old_tmux, &new_tmux)?;
-        if let Some(active) = self.sessions.get_mut(self.selected) {
-            active.name = new_name.clone();
-            active.tmux_name = new_tmux;
-        }
-        let _ = std::fs::remove_file(self.meta_path(&old_short));
-        let _ = self.write_meta(&SessionMeta::new(&new_name, &path));
-        Ok(())
+        out
     }
 
     pub fn grow_sidebar(&mut self) {
@@ -225,27 +148,208 @@ impl App {
         self.sidebar_width = self.sidebar_width.saturating_sub(SIDEBAR_STEP).max(SIDEBAR_MIN);
     }
 
-    pub fn update_statuses(&mut self) {
-        for s in &mut self.sessions {
-            s.recompute_status();
+    /// Rebuild the project/window tree from tmux, preserving per-window status
+    /// state across refreshes.
+    pub fn refresh_tree(&mut self) {
+        if !tmux::is_installed() {
+            return;
+        }
+        let sessions = match tmux::list_sessions() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let windows = tmux::list_windows(&sessions).unwrap_or_default();
+
+        let mut new_projects: Vec<Project> = Vec::new();
+        for full in &sessions {
+            let path = tmux::session_path(full).unwrap_or_else(|| ".".into());
+            let name = tmux::short_name(full).to_string();
+            let mut proj_windows: Vec<WindowRow> = Vec::new();
+            for w in windows.iter().filter(|w| &w.session == full) {
+                // Preserve status state if we already knew about this window.
+                let (status, last_hash, last_change) = self
+                    .projects
+                    .iter()
+                    .find(|p| &p.tmux_name == full)
+                    .and_then(|p| p.windows.iter().find(|r| r.index == w.index))
+                    .map(|r| (r.status, r.last_hash, r.last_change))
+                    .unwrap_or((Status::Unknown, 0, Instant::now()));
+                proj_windows.push(WindowRow {
+                    index: w.index,
+                    name: w.name.clone(),
+                    status,
+                    last_hash,
+                    last_change,
+                });
+            }
+            proj_windows.sort_by_key(|w| w.index);
+            new_projects.push(Project {
+                name,
+                tmux_name: full.clone(),
+                path,
+                windows: proj_windows,
+            });
+        }
+        new_projects.sort_by(|a, b| a.name.cmp(&b.name));
+        self.projects = new_projects;
+
+        // Clamp selection.
+        if let Some(sel) = self.selected {
+            let valid = self
+                .projects
+                .get(sel.project)
+                .map(|p| sel.window < p.windows.len())
+                .unwrap_or(false);
+            if !valid {
+                self.selected = self.flatten().first().map(|(p, w)| Selection {
+                    project: *p,
+                    window: *w,
+                });
+            }
+        } else {
+            self.selected = self.flatten().first().map(|(p, w)| Selection {
+                project: *p,
+                window: *w,
+            });
         }
     }
 
-    fn meta_path(&self, name: &str) -> PathBuf {
-        self.sessions_dir.join(format!("{name}.toml"))
+    /// Poll `tmux capture-pane` for each window and reclassify status.
+    pub fn poll_statuses(&mut self) {
+        let now = Instant::now();
+        for proj in &mut self.projects {
+            for row in &mut proj.windows {
+                let target = format!("{}:{}", proj.tmux_name, row.index);
+                let Some(text) = tmux::capture_pane(&target) else {
+                    continue;
+                };
+                let h = hash_capture(&text);
+                if h != row.last_hash {
+                    row.last_hash = h;
+                    row.last_change = now;
+                }
+                row.status = classify(&text, now.duration_since(row.last_change));
+            }
+        }
     }
 
-    fn write_meta(&self, meta: &SessionMeta) -> Result<()> {
-        let path = self.meta_path(&meta.name);
-        let body = toml::to_string_pretty(meta).context("serialize meta")?;
-        std::fs::write(&path, body).context("write meta file")?;
+    /// Make sure the right-pane pty is attached to the currently-selected
+    /// window; respawn if the target changed.
+    pub fn sync_pane(&mut self) {
+        let Some(sel) = self.selected else {
+            self.pane = None;
+            self.pane_target = None;
+            return;
+        };
+        let Some(proj) = self.projects.get(sel.project) else {
+            return;
+        };
+        let Some(win) = proj.windows.get(sel.window) else {
+            return;
+        };
+        let target = (proj.tmux_name.clone(), win.index);
+        if self.pane_target.as_ref() == Some(&target) && self.pane.is_some() {
+            return;
+        }
+
+        match Pane::spawn_tmux(&proj.tmux_name, win.index, self.pane_rows, self.pane_cols) {
+            Ok(p) => {
+                self.pane = Some(p);
+                self.pane_target = Some(target);
+            }
+            Err(e) => {
+                self.last_error = Some(format!("attach: {e}"));
+                self.pane = None;
+                self.pane_target = None;
+            }
+        }
+    }
+
+    pub fn create_project(&mut self, name: String, path: String) -> Result<()> {
+        if name.trim().is_empty() {
+            anyhow::bail!("project name cannot be empty");
+        }
+        let name = name.trim().to_string();
+        let path = if path.trim().is_empty() {
+            std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| ".".into())
+        } else {
+            shellexpand(path.trim())
+        };
+        let full = tmux::full_name(&name);
+        if tmux::has_session(&full) {
+            anyhow::bail!("tmux session '{full}' already exists");
+        }
+        tmux::new_session(&full, &path)?;
+        self.refresh_tree();
+        // Select the new project's first window.
+        if let Some(p) = self.projects.iter().position(|p| p.tmux_name == full) {
+            self.selected = Some(Selection { project: p, window: 0 });
+        }
         Ok(())
     }
-}
 
-fn load_meta(path: &Path) -> Result<SessionMeta> {
-    let body = std::fs::read_to_string(path)?;
-    Ok(toml::from_str(&body)?)
+    pub fn create_window(&mut self, name: String) -> Result<()> {
+        let Some(sel) = self.selected else {
+            anyhow::bail!("no project selected");
+        };
+        let (full, path) = {
+            let Some(proj) = self.projects.get(sel.project) else {
+                anyhow::bail!("project missing");
+            };
+            (proj.tmux_name.clone(), proj.path.clone())
+        };
+        let win_name = if name.trim().is_empty() { "claude".into() } else { name.trim().to_string() };
+        tmux::new_window(&full, &win_name, &path)?;
+        self.refresh_tree();
+        // Select the new window (highest index in the project).
+        if let Some(pi) = self.projects.iter().position(|p| p.tmux_name == full) {
+            if let Some(wi) = self.projects[pi]
+                .windows
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, w)| w.index)
+                .map(|(i, _)| i)
+            {
+                self.selected = Some(Selection { project: pi, window: wi });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn close_selected_window(&mut self) {
+        let Some(sel) = self.selected else { return };
+        let Some(proj) = self.projects.get(sel.project) else { return };
+        let Some(win) = proj.windows.get(sel.window) else { return };
+        let target = format!("{}:{}", proj.tmux_name, win.index);
+        // Drop pane first so the attached client releases the window cleanly.
+        self.pane = None;
+        self.pane_target = None;
+        let _ = tmux::kill_window(&target);
+        self.refresh_tree();
+    }
+
+    pub fn rename_selected_window(&mut self, new_name: String) -> Result<()> {
+        let new_name = new_name.trim().to_string();
+        if new_name.is_empty() {
+            anyhow::bail!("window name cannot be empty");
+        }
+        let Some(sel) = self.selected else {
+            return Ok(());
+        };
+        let Some(proj) = self.projects.get(sel.project) else {
+            return Ok(());
+        };
+        let Some(win) = proj.windows.get(sel.window) else {
+            return Ok(());
+        };
+        let target = format!("{}:{}", proj.tmux_name, win.index);
+        tmux::rename_window(&target, &new_name)?;
+        self.refresh_tree();
+        Ok(())
+    }
 }
 
 fn shellexpand(s: &str) -> String {

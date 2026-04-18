@@ -3,6 +3,13 @@ use std::process::Command;
 
 pub const PREFIX: &str = "ccm-";
 
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub session: String,
+    pub index: u32,
+    pub name: String,
+}
+
 pub fn full_name(name: &str) -> String {
     if name.starts_with(PREFIX) {
         name.to_string()
@@ -23,33 +30,58 @@ pub fn is_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// List existing ccm-managed tmux sessions. Returns (full_name, short_name) pairs.
+/// List ccm-managed tmux sessions.
 pub fn list_sessions() -> Result<Vec<String>> {
-    let output = Command::new("tmux")
+    let output = match Command::new("tmux")
         .args(["list-sessions", "-F", "#{session_name}"])
-        .output();
-
-    let output = match output {
+        .output()
+    {
         Ok(o) => o,
-        Err(e) => {
-            // tmux server not running is not an error for us
-            if e.kind() == std::io::ErrorKind::NotFound {
-                return Ok(vec![]);
-            }
-            return Err(e).context("failed to spawn tmux");
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).context("spawn tmux list-sessions"),
     };
-
     if !output.status.success() {
-        // "no server running" exits non-zero — treat as empty list
+        // "no server running" exits non-zero — treat as empty.
         return Ok(vec![]);
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|l| l.starts_with(PREFIX))
         .map(|l| l.to_string())
+        .collect())
+}
+
+/// List all windows across the given sessions.
+pub fn list_windows(sessions: &[String]) -> Result<Vec<WindowInfo>> {
+    if sessions.is_empty() {
+        return Ok(vec![]);
+    }
+    let output = Command::new("tmux")
+        .args([
+            "list-windows",
+            "-a",
+            "-F",
+            "#{session_name}|#{window_index}|#{window_name}",
+        ])
+        .output()
+        .context("spawn tmux list-windows")?;
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+    let set: std::collections::HashSet<&str> = sessions.iter().map(|s| s.as_str()).collect();
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '|');
+            let session = parts.next()?.to_string();
+            let index: u32 = parts.next()?.parse().ok()?;
+            let name = parts.next()?.to_string();
+            if set.contains(session.as_str()) {
+                Some(WindowInfo { session, index, name })
+            } else {
+                None
+            }
+        })
         .collect())
 }
 
@@ -65,52 +97,73 @@ pub fn new_session(full_name: &str, path: &str) -> Result<()> {
     let status = Command::new("tmux")
         .args(["new-session", "-d", "-s", full_name, "-c", path])
         .status()
-        .context("failed to spawn tmux new-session")?;
+        .context("spawn tmux new-session")?;
     if !status.success() {
         anyhow::bail!("tmux new-session failed for {full_name}");
     }
-    Ok(())
-}
-
-pub fn kill_session(full_name: &str) -> Result<()> {
+    // Disable status bar so it doesn't generate idle ticks that fool our
+    // status detection.
     let _ = Command::new("tmux")
-        .args(["kill-session", "-t", full_name])
+        .args(["set-option", "-t", full_name, "status", "off"])
         .status();
     Ok(())
 }
 
-pub fn rename_session(old_full: &str, new_full: &str) -> Result<()> {
+pub fn new_window(session: &str, name: &str, path: &str) -> Result<()> {
     let status = Command::new("tmux")
-        .args(["rename-session", "-t", old_full, new_full])
+        .args(["new-window", "-t", session, "-n", name, "-c", path])
         .status()
-        .context("failed to spawn tmux rename-session")?;
+        .context("spawn tmux new-window")?;
     if !status.success() {
-        anyhow::bail!("tmux rename-session failed");
+        anyhow::bail!("tmux new-window failed");
     }
     Ok(())
 }
 
-/// Build the argv for attaching to a tmux session from inside a pty.
-/// We use `-u` for unicode, `-2` for 256-color. `new-session -A` attaches if it
-/// exists, creates if it doesn't, so repeated attach is safe.
-pub fn attach_command(full_name: &str, path: &str) -> (String, Vec<String>) {
+pub fn kill_window(target: &str) -> Result<()> {
+    let _ = Command::new("tmux").args(["kill-window", "-t", target]).status();
+    Ok(())
+}
+
+pub fn rename_window(target: &str, new_name: &str) -> Result<()> {
+    let status = Command::new("tmux")
+        .args(["rename-window", "-t", target, new_name])
+        .status()
+        .context("spawn tmux rename-window")?;
+    if !status.success() {
+        anyhow::bail!("tmux rename-window failed");
+    }
+    Ok(())
+}
+
+/// Capture the visible contents of the given window (plain text, wrapped
+/// lines joined). Used for polling status without attaching.
+pub fn capture_pane(target: &str) -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["capture-pane", "-t", target, "-p", "-J"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// argv for attaching to a specific window of a session.
+pub fn attach_window_command(session: &str, window_index: u32) -> (String, Vec<String>) {
     (
         "tmux".to_string(),
         vec![
             "-u".into(),
             "-2".into(),
-            "new-session".into(),
-            "-A".into(),
-            "-s".into(),
-            full_name.into(),
-            "-c".into(),
-            path.into(),
+            "attach-session".into(),
+            "-t".into(),
+            format!("{session}:{window_index}"),
         ],
     )
 }
 
-/// Get the working directory of the first pane of a tmux session, used to
-/// repopulate `path` for sessions picked up at launch.
+/// Working directory of the given window's active pane.
 pub fn session_path(full_name: &str) -> Option<String> {
     let out = Command::new("tmux")
         .args([
@@ -126,9 +179,5 @@ pub fn session_path(full_name: &str) -> Option<String> {
         return None;
     }
     let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
+    if path.is_empty() { None } else { Some(path) }
 }
