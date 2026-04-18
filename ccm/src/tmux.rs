@@ -173,6 +173,11 @@ pub fn active_window(session: &str) -> Option<u32> {
     display_message(session, "#{window_index}")?.parse().ok()
 }
 
+/// Pane ID (e.g. `%5`) of the active pane in the given window target.
+pub fn active_pane_id(target: &str) -> Option<String> {
+    display_message(target, "#{pane_id}")
+}
+
 fn display_message(target: &str, fmt: &str) -> Option<String> {
     let out = Command::new("tmux")
         .args(["display-message", "-p", "-t", target, fmt])

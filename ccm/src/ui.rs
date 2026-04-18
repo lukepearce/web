@@ -122,14 +122,31 @@ fn meta_line(verbose: bool, w: &crate::app::WindowRow) -> String {
         parts.push(format!(" {b}"));
     }
     if verbose {
-        if let Some(c) = w.context_pct {
-            parts.push(format!("ctx {c}%"));
-        }
-        if let Some(t) = &w.tokens {
-            parts.push(format!("{t} tok"));
+        if let Some(meta) = &w.meta {
+            if let Some(c) = meta.context_pct {
+                parts.push(format!("ctx {c}%"));
+            }
+            if let Some(t) = meta.context_tokens {
+                parts.push(format!("{} tok", fmt_count(t)));
+            }
+            if let Some(usd) = meta.cost_usd {
+                if usd > 0.0 {
+                    parts.push(format!("${usd:.2}"));
+                }
+            }
         }
     }
     parts.join("  ")
+}
+
+fn fmt_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {

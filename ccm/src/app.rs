@@ -1,11 +1,55 @@
 use anyhow::Result;
+use serde::Deserialize;
+use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::session::{
-    classify, hash_capture, parse_claude_meta, parse_session_usage, Pane, Status,
-};
+use crate::session::{classify, hash_capture, Pane, Status};
 use crate::tmux;
+
+/// Sidecar JSON written by the Claude Code statusLine hook (see
+/// scripts/ccm-statusline.sh). Lives at
+/// `$XDG_CACHE_HOME/ccm/panes/<tmux_pane_id>.json`. All fields optional —
+/// CCM renders whatever is present.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
+pub struct PaneMeta {
+    pub model: Option<String>,
+    pub context_pct: Option<u8>,
+    pub context_tokens: Option<u64>,
+    pub context_max: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub session_pct: Option<u8>,
+    pub session_reset_in: Option<String>,
+    /// Unix seconds when the sidecar was written; we treat data older than
+    /// 60s as stale.
+    pub ts: Option<u64>,
+}
+
+fn sidecar_dir() -> PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(dirs::cache_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("ccm").join("panes")
+}
+
+fn read_sidecar(pane_id: &str) -> Option<PaneMeta> {
+    let path = sidecar_dir().join(format!("{pane_id}.json"));
+    let body = std::fs::read_to_string(&path).ok()?;
+    let meta: PaneMeta = serde_json::from_str(&body).ok()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if let Some(ts) = meta.ts {
+        if now.saturating_sub(ts) > 60 {
+            return None;
+        }
+    }
+    Some(meta)
+}
 
 pub const SIDEBAR_MIN: u16 = 10;
 pub const SIDEBAR_MAX: u16 = 60;
@@ -25,8 +69,8 @@ pub struct WindowRow {
     pub status: Status,
     pub path: Option<String>,
     pub branch: Option<String>,
-    pub context_pct: Option<u8>,
-    pub tokens: Option<String>,
+    pub pane_id: Option<String>,
+    pub meta: Option<PaneMeta>,
     pub last_hash: u64,
     pub last_change: Instant,
     pub last_branch_check: Option<Instant>,
@@ -186,13 +230,13 @@ impl App {
             for w in windows.iter().filter(|w| &w.session == full) {
                 let win_target = format!("{full}:{}", w.index);
                 let win_path = tmux::session_path(&win_target);
-                // Preserve per-window state across refreshes.
+                let pane_id = tmux::active_pane_id(&win_target);
                 let prior = self
                     .projects
                     .iter()
                     .find(|p| &p.tmux_name == full)
                     .and_then(|p| p.windows.iter().find(|r| r.index == w.index));
-                let (status, last_hash, last_change, branch, last_branch_check, ctx, toks) =
+                let (status, last_hash, last_change, branch, last_branch_check, meta) =
                     match prior {
                         Some(r) => (
                             r.status,
@@ -200,10 +244,9 @@ impl App {
                             r.last_change,
                             r.branch.clone(),
                             r.last_branch_check,
-                            r.context_pct,
-                            r.tokens.clone(),
+                            r.meta.clone(),
                         ),
-                        None => (Status::Unknown, 0, Instant::now(), None, None, None, None),
+                        None => (Status::Unknown, 0, Instant::now(), None, None, None),
                     };
                 proj_windows.push(WindowRow {
                     index: w.index,
@@ -211,8 +254,8 @@ impl App {
                     status,
                     path: win_path,
                     branch,
-                    context_pct: ctx,
-                    tokens: toks,
+                    pane_id,
+                    meta,
                     last_hash,
                     last_change,
                     last_branch_check,
@@ -253,11 +296,11 @@ impl App {
         }
     }
 
-    /// Poll `tmux capture-pane` for each window and reclassify status.
-    /// Also extracts Claude Code context / token counts from the capture.
+    /// Poll `tmux capture-pane` for status, and re-read each window's
+    /// statusline sidecar for Claude metadata.
     pub fn poll_statuses(&mut self) {
         let now = Instant::now();
-        let mut latest_usage: Option<String> = None;
+        let mut latest_session: Option<String> = None;
         let active_target = self
             .selected_project()
             .zip(self.selected_window())
@@ -266,30 +309,38 @@ impl App {
         for proj in &mut self.projects {
             for row in &mut proj.windows {
                 let target = format!("{}:{}", proj.tmux_name, row.index);
-                let Some(text) = tmux::capture_pane(&target) else {
-                    continue;
-                };
-                let h = hash_capture(&text);
-                if h != row.last_hash {
-                    row.last_hash = h;
-                    row.last_change = now;
+                if let Some(text) = tmux::capture_pane(&target) {
+                    let h = hash_capture(&text);
+                    if h != row.last_hash {
+                        row.last_hash = h;
+                        row.last_change = now;
+                    }
+                    row.status = classify(&text, now.duration_since(row.last_change));
                 }
-                row.status = classify(&text, now.duration_since(row.last_change));
-                let (ctx, toks) = parse_claude_meta(&text);
-                if ctx.is_some() { row.context_pct = ctx; }
-                if toks.is_some() { row.tokens = toks; }
 
-                if active_target.as_ref() == Some(&(proj.tmux_name.clone(), row.index)) {
-                    if let Some(u) = parse_session_usage(&text) {
-                        latest_usage = Some(u);
+                if let Some(pid) = row.pane_id.as_deref() {
+                    if let Some(meta) = read_sidecar(pid) {
+                        if active_target.as_ref()
+                            == Some(&(proj.tmux_name.clone(), row.index))
+                        {
+                            if let Some(p) = meta.session_pct {
+                                let reset = meta
+                                    .session_reset_in
+                                    .as_deref()
+                                    .map(|s| format!(" · resets in {s}"))
+                                    .unwrap_or_default();
+                                latest_session = Some(format!("session {p}%{reset}"));
+                            }
+                        }
+                        row.meta = Some(meta);
+                    } else {
+                        row.meta = None;
                     }
                 }
             }
         }
 
-        if latest_usage.is_some() {
-            self.session_usage = latest_usage;
-        }
+        self.session_usage = latest_session;
     }
 
     /// Refresh git branch per window (cheap but not free — only re-runs every
