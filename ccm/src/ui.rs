@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -13,6 +13,16 @@ pub fn layout(area: Rect, sidebar_width: u16) -> (Rect, Rect) {
         .constraints([Constraint::Length(sidebar_width), Constraint::Min(10)])
         .split(area);
     (chunks[0], chunks[1])
+}
+
+/// Inner (content) rect of the terminal pane, matching what `draw_terminal`
+/// builds. Exposed so main.rs can size the pty to match.
+pub fn terminal_inner(area: Rect) -> Rect {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(Padding::new(1, 1, 0, 0))
+        .inner(area)
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -29,24 +39,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+    let title = match &app.session_usage {
+        Some(u) => format!(" CCM · {u} "),
+        None => " CCM ".to_string(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(
-            " CCM ",
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let content_width = inner.width as usize;
-    let mut lines: Vec<Line> = Vec::with_capacity(app.projects.iter().map(|p| p.windows.len() + 2).sum::<usize>() + 2);
+    let mut lines: Vec<Line> = Vec::new();
 
     for (pi, proj) in app.projects.iter().enumerate() {
         lines.push(Line::from(vec![Span::styled(
             format!(" {}", proj.name),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )]));
         lines.push(Line::from(vec![Span::styled(
             pad(&format!(" {}", short_path(&proj.path)), content_width),
@@ -57,8 +67,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 .selected
                 .map(|s| s.project == pi && s.window == wi)
                 .unwrap_or(false);
-
-            let caret = if selected { "▸ " } else { "  " };
+            let caret = if selected { "▸" } else { " " };
             let name_style = if selected {
                 Style::default()
                     .fg(Color::Black)
@@ -68,39 +77,71 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default()
             };
             lines.push(Line::from(vec![
-                Span::raw(caret),
+                Span::raw(format!("{caret} ")),
                 Span::styled(
-                    format!(" {} ", win.status.dot()),
+                    format!("{} ", win.status.dot()),
                     Style::default().fg(win.status.color()),
                 ),
-                Span::styled(format!(" {} ", win.name), name_style),
+                Span::styled(
+                    format!(" {} ", win.name),
+                    name_style,
+                ),
                 Span::styled(
                     format!(" {}", win.index),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
+
+            // Metadata line under each window.
+            let meta = meta_line(app.verbose, win);
+            if !meta.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    pad(&format!("     {meta}"), content_width),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
         lines.push(Line::raw(""));
     }
 
     lines.push(Line::from(Span::styled(
-        " [Alt+N] project ",
+        " Alt+N project   Alt+A window",
         Style::default().fg(Color::Cyan),
     )));
     lines.push(Line::from(Span::styled(
-        " [Alt+A] window  ",
+        " Alt+1-9 switch  Alt+T toggle",
         Style::default().fg(Color::Cyan),
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn meta_line(verbose: bool, w: &crate::app::WindowRow) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = &w.branch {
+        parts.push(format!(" {b}"));
+    }
+    if verbose {
+        if let Some(c) = w.context_pct {
+            parts.push(format!("ctx {c}%"));
+        }
+        if let Some(t) = &w.tokens {
+            parts.push(format!("{t} tok"));
+        }
+    }
+    parts.join("  ")
+}
+
 fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
     let title = match (app.selected_project(), app.selected_window()) {
-        (Some(p), Some(w)) => format!(" {} / {} — {} ", p.name, w.name, p.path),
-        _ => " no session — Alt+N to create one ".to_string(),
+        (Some(p), Some(w)) => format!(" {} · {} ", p.name, w.name),
+        _ => " no window ".to_string(),
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -171,7 +212,10 @@ fn draw_prompt(frame: &mut Frame, prompt: &crate::app::Prompt) {
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = Rect { x, y, width, height };
     frame.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
         prompt.title(),
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     ));
@@ -191,7 +235,10 @@ fn draw_toast(frame: &mut Frame, msg: &str) {
         height: 3,
     };
     frame.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
         " error ",
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     ));

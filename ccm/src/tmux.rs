@@ -163,21 +163,43 @@ pub fn attach_window_command(session: &str, window_index: u32) -> (String, Vec<S
     )
 }
 
-/// Working directory of the given window's active pane.
-pub fn session_path(full_name: &str) -> Option<String> {
+/// Working directory of the given target's active pane.
+pub fn session_path(target: &str) -> Option<String> {
+    display_message(target, "#{pane_current_path}")
+}
+
+/// Currently active window index of a session.
+pub fn active_window(session: &str) -> Option<u32> {
+    display_message(session, "#{window_index}")?.parse().ok()
+}
+
+fn display_message(target: &str, fmt: &str) -> Option<String> {
     let out = Command::new("tmux")
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            full_name,
-            "#{pane_current_path}",
-        ])
+        .args(["display-message", "-p", "-t", target, fmt])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if v.is_empty() { None } else { Some(v) }
+}
+
+/// Idempotently disable the tmux status bar on a ccm-managed session so its
+/// clock ticks don't fake activity.
+pub fn disable_status_bar(session: &str) {
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session, "status", "off"])
+        .status();
+}
+
+/// Select (switch-to) a specific window of a session without a client.
+pub fn select_window(session: &str, window_index: u32) {
+    let _ = Command::new("tmux")
+        .args([
+            "select-window",
+            "-t",
+            &format!("{session}:{window_index}"),
+        ])
+        .status();
 }

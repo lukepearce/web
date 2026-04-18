@@ -37,18 +37,38 @@ impl Status {
 
 const SPINNER_CHARS: &[char] = &[
     '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏',
+    '◐', '◓', '◑', '◒', '✢', '✳', '∗', '✻', '✽',
 ];
-const PROCESSING_CHANGE_MS: u128 = 600;
-const IDLE_QUIET_MS: u128 = 2_500;
+const PROCESSING_MARKERS: &[&str] = &[
+    "esc to interrupt",
+    "esc to cancel",
+    "thinking…",
+    "thinking...",
+    "running…",
+    "running...",
+    "working…",
+    "working...",
+];
+const PROCESSING_CHANGE_MS: u128 = 1_200;
+const IDLE_QUIET_MS: u128 = 3_000;
 
 /// Classify a captured pane's visible text into a status, given how long ago
 /// the text last changed.
 pub fn classify(captured: &str, since_change: Duration) -> Status {
-    if needs_input(captured) {
-        return Status::NeedsInput;
+    if captured.trim().is_empty() {
+        return Status::Unknown;
     }
-    if captured.chars().any(|c| SPINNER_CHARS.contains(&c)) {
+    // Processing markers beat the prompt check — Claude Code always has the
+    // `>` box visible even while thinking, and we don't want that to flip us
+    // to NeedsInput in the middle of a run.
+    let lower = captured.to_ascii_lowercase();
+    if PROCESSING_MARKERS.iter().any(|m| lower.contains(m))
+        || captured.chars().any(|c| SPINNER_CHARS.contains(&c))
+    {
         return Status::Processing;
+    }
+    if needs_input(&lower, captured) {
+        return Status::NeedsInput;
     }
     let ms = since_change.as_millis();
     if ms < PROCESSING_CHANGE_MS {
@@ -60,15 +80,16 @@ pub fn classify(captured: &str, since_change: Duration) -> Status {
     Status::Processing
 }
 
-fn needs_input(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+fn needs_input(lower: &str, raw: &str) -> bool {
     let phrase_hits = [
         "do you want to",
-        "allow this ",
+        "do you trust",
         "(y/n)",
         "[y/n]",
+        "(yes/no)",
         "press enter",
         "❯ 1.",
+        "❯ 2.",
     ]
     .iter()
     .any(|p| lower.contains(p));
@@ -77,13 +98,17 @@ fn needs_input(text: &str) -> bool {
         return true;
     }
 
-    // Last non-empty line ends with Claude Code's input marker.
-    for line in text.lines().rev() {
+    // Claude Code's input box — a line ending with `>` or `❯` after the
+    // prompt glyph. Scan the last few non-empty lines to tolerate trailing
+    // blank lines tmux adds.
+    for line in raw.lines().rev().take(5) {
         let t = line.trim_end();
         if t.is_empty() {
             continue;
         }
-        return t.ends_with('>') || t.ends_with('❯');
+        if t.ends_with('>') || t.ends_with('❯') {
+            return true;
+        }
     }
     false
 }
@@ -206,6 +231,105 @@ fn reader_loop(
             }
         }
     }
+}
+
+/// Best-effort parse of Claude Code's status line. Looks for a percent near
+/// "context" and a token count near "tokens". Returns `(context_pct, tokens)`.
+/// Either may be None if the pattern isn't in the captured text.
+pub fn parse_claude_meta(text: &str) -> (Option<u8>, Option<String>) {
+    let lower = text.to_ascii_lowercase();
+    let context = find_context_pct(&lower);
+    let tokens = find_tokens(&lower);
+    (context, tokens)
+}
+
+fn find_context_pct(lower: &str) -> Option<u8> {
+    // Patterns: "context: 12%", "12% context", "ctx 12%".
+    let anchors = ["context", "ctx"];
+    for anchor in anchors {
+        let mut search: &str = lower;
+        while let Some(i) = search.find(anchor) {
+            let window_start = i.saturating_sub(12);
+            let window_end = (i + anchor.len() + 12).min(search.len());
+            let window = &search[window_start..window_end];
+            if let Some(p) = extract_percent(window) {
+                return Some(p);
+            }
+            search = &search[i + anchor.len()..];
+        }
+    }
+    None
+}
+
+fn extract_percent(s: &str) -> Option<u8> {
+    // Find "<digits>%" in s.
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'%' {
+                return s[start..i].parse::<u32>().ok().map(|v| v.min(100) as u8);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_tokens(lower: &str) -> Option<String> {
+    // Patterns: "12k tokens", "1,234 tokens", "tokens: 12k".
+    let mut search: &str = lower;
+    while let Some(i) = search.find("tokens") {
+        let window_start = i.saturating_sub(16);
+        let window_end = (i + "tokens".len() + 16).min(search.len());
+        let window = &search[window_start..window_end];
+        if let Some(n) = extract_token_number(window) {
+            return Some(n);
+        }
+        search = &search[i + "tokens".len()..];
+    }
+    None
+}
+
+fn extract_token_number(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b',' || bytes[i] == b'.') {
+                i += 1;
+            }
+            let mut end = i;
+            if end < bytes.len() && (bytes[end] == b'k' || bytes[end] == b'K' || bytes[end] == b'm' || bytes[end] == b'M') {
+                end += 1;
+            }
+            return Some(s[start..end].to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Best-effort parse for the Claude 5-hour session indicator. Looks for
+/// "session" near a percent or "reset <time>" phrase.
+pub fn parse_session_usage(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let i = lower.find("session")?;
+    let window_end = (i + 64).min(lower.len());
+    let window = &lower[i..window_end];
+    if let Some(p) = extract_percent(window) {
+        return Some(format!("{p}%"));
+    }
+    if let Some(reset_at) = window.find("reset") {
+        let tail = &window[reset_at..(reset_at + 32).min(window.len())];
+        return Some(tail.trim().to_string());
+    }
+    None
 }
 
 /// Stable hash of visible text that ignores trailing whitespace.

@@ -88,6 +88,7 @@ fn run(terminal: &mut Term) -> Result<()> {
         }
         if last_tree_refresh.elapsed() >= Duration::from_secs(3) {
             app.refresh_tree();
+            app.follow_tmux_active();
             last_tree_refresh = Instant::now();
         }
 
@@ -118,9 +119,7 @@ fn recompute_pane_size(terminal: &Term, app: &mut App) {
         height: size.height,
     };
     let (_, pane) = ui::layout(rect, app.sidebar_width);
-    let inner = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .inner(pane);
+    let inner = ui::terminal_inner(pane);
     app.pane_rows = inner.height.max(1);
     app.pane_cols = inner.width.max(1);
 }
@@ -185,6 +184,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 });
             }
         }
+        Action::ToggleVerbose => app.toggle_verbose(),
+        Action::SelectWindow(idx) => app.select_window_by_index(idx),
         Action::Detach => app.should_quit = true,
         Action::PassThrough => {
             if let Some(bytes) = encode_key(key) {

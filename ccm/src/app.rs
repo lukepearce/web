@@ -1,7 +1,10 @@
 use anyhow::Result;
+use std::process::Command;
 use std::time::Instant;
 
-use crate::session::{classify, hash_capture, Pane, Status};
+use crate::session::{
+    classify, hash_capture, parse_claude_meta, parse_session_usage, Pane, Status,
+};
 use crate::tmux;
 
 pub const SIDEBAR_MIN: u16 = 10;
@@ -13,14 +16,20 @@ pub struct Project {
     pub tmux_name: String,  // "ccm-floom"
     pub path: String,
     pub windows: Vec<WindowRow>,
+    pub tmux_active_window: Option<u32>,
 }
 
 pub struct WindowRow {
     pub index: u32,
     pub name: String,
     pub status: Status,
+    pub path: Option<String>,
+    pub branch: Option<String>,
+    pub context_pct: Option<u8>,
+    pub tokens: Option<String>,
     pub last_hash: u64,
     pub last_change: Instant,
+    pub last_branch_check: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +52,8 @@ pub struct App {
     pub pane_rows: u16,
     pub pane_cols: u16,
     pub sidebar_width: u16,
+    pub verbose: bool,
+    pub session_usage: Option<String>,
 }
 
 pub struct Prompt {
@@ -90,7 +101,9 @@ impl App {
             last_error: None,
             pane_rows: 24,
             pane_cols: 80,
-            sidebar_width: 24,
+            sidebar_width: 26,
+            verbose: false,
+            session_usage: None,
         })
     }
 
@@ -162,24 +175,47 @@ impl App {
 
         let mut new_projects: Vec<Project> = Vec::new();
         for full in &sessions {
+            // Idempotently disable the tmux status bar so its clock tick
+            // doesn't defeat our idle detection.
+            tmux::disable_status_bar(full);
+
             let path = tmux::session_path(full).unwrap_or_else(|| ".".into());
             let name = tmux::short_name(full).to_string();
+            let tmux_active_window = tmux::active_window(full);
             let mut proj_windows: Vec<WindowRow> = Vec::new();
             for w in windows.iter().filter(|w| &w.session == full) {
-                // Preserve status state if we already knew about this window.
-                let (status, last_hash, last_change) = self
+                let win_target = format!("{full}:{}", w.index);
+                let win_path = tmux::session_path(&win_target);
+                // Preserve per-window state across refreshes.
+                let prior = self
                     .projects
                     .iter()
                     .find(|p| &p.tmux_name == full)
-                    .and_then(|p| p.windows.iter().find(|r| r.index == w.index))
-                    .map(|r| (r.status, r.last_hash, r.last_change))
-                    .unwrap_or((Status::Unknown, 0, Instant::now()));
+                    .and_then(|p| p.windows.iter().find(|r| r.index == w.index));
+                let (status, last_hash, last_change, branch, last_branch_check, ctx, toks) =
+                    match prior {
+                        Some(r) => (
+                            r.status,
+                            r.last_hash,
+                            r.last_change,
+                            r.branch.clone(),
+                            r.last_branch_check,
+                            r.context_pct,
+                            r.tokens.clone(),
+                        ),
+                        None => (Status::Unknown, 0, Instant::now(), None, None, None, None),
+                    };
                 proj_windows.push(WindowRow {
                     index: w.index,
                     name: w.name.clone(),
                     status,
+                    path: win_path,
+                    branch,
+                    context_pct: ctx,
+                    tokens: toks,
                     last_hash,
                     last_change,
+                    last_branch_check,
                 });
             }
             proj_windows.sort_by_key(|w| w.index);
@@ -188,10 +224,13 @@ impl App {
                 tmux_name: full.clone(),
                 path,
                 windows: proj_windows,
+                tmux_active_window,
             });
         }
         new_projects.sort_by(|a, b| a.name.cmp(&b.name));
         self.projects = new_projects;
+
+        self.refresh_branches();
 
         // Clamp selection.
         if let Some(sel) = self.selected {
@@ -215,8 +254,15 @@ impl App {
     }
 
     /// Poll `tmux capture-pane` for each window and reclassify status.
+    /// Also extracts Claude Code context / token counts from the capture.
     pub fn poll_statuses(&mut self) {
         let now = Instant::now();
+        let mut latest_usage: Option<String> = None;
+        let active_target = self
+            .selected_project()
+            .zip(self.selected_window())
+            .map(|(p, w)| (p.tmux_name.clone(), w.index));
+
         for proj in &mut self.projects {
             for row in &mut proj.windows {
                 let target = format!("{}:{}", proj.tmux_name, row.index);
@@ -229,8 +275,71 @@ impl App {
                     row.last_change = now;
                 }
                 row.status = classify(&text, now.duration_since(row.last_change));
+                let (ctx, toks) = parse_claude_meta(&text);
+                if ctx.is_some() { row.context_pct = ctx; }
+                if toks.is_some() { row.tokens = toks; }
+
+                if active_target.as_ref() == Some(&(proj.tmux_name.clone(), row.index)) {
+                    if let Some(u) = parse_session_usage(&text) {
+                        latest_usage = Some(u);
+                    }
+                }
             }
         }
+
+        if latest_usage.is_some() {
+            self.session_usage = latest_usage;
+        }
+    }
+
+    /// Refresh git branch per window (cheap but not free — only re-runs every
+    /// 5s per window).
+    fn refresh_branches(&mut self) {
+        let now = Instant::now();
+        for proj in &mut self.projects {
+            for row in &mut proj.windows {
+                let due = row
+                    .last_branch_check
+                    .map(|t| now.duration_since(t).as_secs() >= 5)
+                    .unwrap_or(true);
+                if !due {
+                    continue;
+                }
+                row.last_branch_check = Some(now);
+                let Some(path) = row.path.as_deref() else { continue };
+                row.branch = current_branch(path);
+            }
+        }
+    }
+
+    /// If the tmux-side active window of the selected project has changed
+    /// externally (e.g. user hit the tmux prefix+n inside), track it.
+    pub fn follow_tmux_active(&mut self) {
+        let Some(sel) = self.selected else { return };
+        let Some(proj) = self.projects.get(sel.project) else { return };
+        let Some(active) = proj.tmux_active_window else { return };
+        let Some(current_idx) = proj.windows.get(sel.window).map(|w| w.index) else { return };
+        if active == current_idx {
+            return;
+        }
+        if let Some(wi) = proj.windows.iter().position(|w| w.index == active) {
+            self.selected = Some(Selection { project: sel.project, window: wi });
+        }
+    }
+
+    pub fn select_window_by_index(&mut self, idx: u32) {
+        let Some(sel) = self.selected else { return };
+        let Some(proj) = self.projects.get(sel.project) else { return };
+        let Some(wi) = proj.windows.iter().position(|w| w.index == idx) else { return };
+        let tmux_name = proj.tmux_name.clone();
+        self.selected = Some(Selection { project: sel.project, window: wi });
+        // Also tell tmux to move its own active window pointer for the session
+        // so external attach-sessions stay in sync.
+        tmux::select_window(&tmux_name, idx);
+    }
+
+    pub fn toggle_verbose(&mut self) {
+        self.verbose = !self.verbose;
     }
 
     /// Make sure the right-pane pty is attached to the currently-selected
@@ -350,6 +459,18 @@ impl App {
         self.refresh_tree();
         Ok(())
     }
+}
+
+fn current_branch(path: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C", path, "branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn shellexpand(s: &str) -> String {

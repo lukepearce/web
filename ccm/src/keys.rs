@@ -11,6 +11,8 @@ pub enum Action {
     Detach,
     ShrinkSidebar,
     GrowSidebar,
+    ToggleVerbose,
+    SelectWindow(u32),
     PassThrough,
 }
 
@@ -28,6 +30,10 @@ pub fn classify(key: KeyEvent) -> Action {
         (_, true, KeyCode::Char('a') | KeyCode::Char('A')) => Action::NewWindow,
         (_, true, KeyCode::Char('w') | KeyCode::Char('W')) => Action::CloseSession,
         (_, true, KeyCode::Char('r') | KeyCode::Char('R')) => Action::RenameSession,
+        (_, true, KeyCode::Char('t') | KeyCode::Char('T')) => Action::ToggleVerbose,
+        (_, true, KeyCode::Char(c @ '0'..='9')) => {
+            Action::SelectWindow(c.to_digit(10).unwrap())
+        }
         (true, _, KeyCode::Char('d') | KeyCode::Char('D')) => Action::Detach,
         _ => Action::PassThrough,
     }
