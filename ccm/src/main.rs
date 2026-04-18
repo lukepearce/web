@@ -63,7 +63,7 @@ fn run(terminal: &mut Term) -> Result<()> {
         width: size.width,
         height: size.height,
     };
-    let (_, pane) = ui::layout(initial_rect);
+    let (_, pane) = ui::layout(initial_rect, app.sidebar_width);
     let inner = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .inner(pane);
@@ -93,7 +93,7 @@ fn run(terminal: &mut Term) -> Result<()> {
             width: size.width,
             height: size.height,
         };
-        let (_, pane) = ui::layout(rect);
+        let (_, pane) = ui::layout(rect, app.sidebar_width);
         let inner = ratatui::widgets::Block::default()
             .borders(ratatui::widgets::Borders::ALL)
             .inner(pane);
@@ -190,6 +190,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 });
             }
         }
+        Action::ShrinkSidebar => app.shrink_sidebar(),
+        Action::GrowSidebar => app.grow_sidebar(),
         Action::Detach => {
             // Drop out of the TUI — sessions persist in tmux. A later ccm
             // launch will pick them up.

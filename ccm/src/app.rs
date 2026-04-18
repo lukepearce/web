@@ -44,7 +44,13 @@ pub struct App {
     /// is sized right from the start.
     pub pane_rows: u16,
     pub pane_cols: u16,
+
+    pub sidebar_width: u16,
 }
+
+pub const SIDEBAR_MIN: u16 = 10;
+pub const SIDEBAR_MAX: u16 = 60;
+const SIDEBAR_STEP: u16 = 2;
 
 pub struct Prompt {
     pub kind: PromptKind,
@@ -96,6 +102,7 @@ impl App {
             sessions_dir,
             pane_rows: 24,
             pane_cols: 80,
+            sidebar_width: 22,
         })
     }
 
@@ -208,6 +215,14 @@ impl App {
         let _ = std::fs::remove_file(self.meta_path(&old_short));
         let _ = self.write_meta(&SessionMeta::new(&new_name, &path));
         Ok(())
+    }
+
+    pub fn grow_sidebar(&mut self) {
+        self.sidebar_width = (self.sidebar_width + SIDEBAR_STEP).min(SIDEBAR_MAX);
+    }
+
+    pub fn shrink_sidebar(&mut self) {
+        self.sidebar_width = self.sidebar_width.saturating_sub(SIDEBAR_STEP).max(SIDEBAR_MIN);
     }
 
     pub fn update_statuses(&mut self) {

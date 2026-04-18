@@ -8,6 +8,8 @@ pub enum Action {
     CloseSession,
     RenameSession,
     Detach,
+    ShrinkSidebar,
+    GrowSidebar,
     PassThrough,
 }
 
@@ -19,6 +21,8 @@ pub fn classify(key: KeyEvent) -> Action {
         (true, _, KeyCode::Char('q')) => Action::Quit,
         (_, true, KeyCode::Char('j') | KeyCode::Char('J')) => Action::NextSession,
         (_, true, KeyCode::Char('k') | KeyCode::Char('K')) => Action::PrevSession,
+        (_, true, KeyCode::Char('h') | KeyCode::Char('H')) => Action::ShrinkSidebar,
+        (_, true, KeyCode::Char('l') | KeyCode::Char('L')) => Action::GrowSidebar,
         (_, true, KeyCode::Char('n') | KeyCode::Char('N')) => Action::NewSession,
         (_, true, KeyCode::Char('w') | KeyCode::Char('W')) => Action::CloseSession,
         (_, true, KeyCode::Char('r') | KeyCode::Char('R')) => Action::RenameSession,

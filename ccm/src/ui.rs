@@ -6,19 +6,17 @@ use ratatui::Frame;
 
 use crate::app::App;
 
-pub const SIDEBAR_WIDTH: u16 = 22;
-
 /// Splits the UI into (sidebar, terminal_pane) rects.
-pub fn layout(area: Rect) -> (Rect, Rect) {
+pub fn layout(area: Rect, sidebar_width: u16) -> (Rect, Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(10)])
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(10)])
         .split(area);
     (chunks[0], chunks[1])
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let (sidebar, pane) = layout(frame.area());
+    let (sidebar, pane) = layout(frame.area(), app.sidebar_width);
     draw_sidebar(frame, app, sidebar);
     draw_terminal(frame, app, pane);
 
@@ -41,6 +39,10 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    let content_width = inner.width as usize;
+    let name_col_width = content_width.saturating_sub(4);
+    let path_col_width = content_width.saturating_sub(2);
 
     // Each session entry is two lines: "dot name" then a dim short path.
     let mut lines: Vec<Line> = Vec::with_capacity(app.sessions.len() * 3 + 1);
@@ -65,10 +67,10 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 format!(" {} ", s.status.dot()),
                 Style::default().fg(s.status.color()),
             ),
-            Span::styled(pad(&s.name, (SIDEBAR_WIDTH as usize).saturating_sub(5)), name_style),
+            Span::styled(pad(&s.name, name_col_width), name_style),
         ]));
         lines.push(Line::from(vec![Span::styled(
-            pad(&format!("    {}", short_path(&s.path)), SIDEBAR_WIDTH as usize - 2),
+            pad(&format!("    {}", short_path(&s.path)), path_col_width),
             path_style,
         )]));
         lines.push(Line::raw(""));
